@@ -1,50 +1,45 @@
 """
-新闻深度分析工具 - 基于Streamlit与GitHub Models API
-用户输入新闻文本，AI按照“老记者6大维度”返回分析结果
-支持部署到Streamlit Cloud，需在Secrets中设置GITHUB_TOKEN
+新闻深度分析工具 - 基于 Streamlit + GitHub Models API
+输入新闻文本，AI 按照6大维度返回深度分析
+支持本地运行（便携版）和云端部署（Streamlit Cloud）
 """
 
 import streamlit as st
 import requests
 import json
+import os
 from typing import Optional
 
 # ---------- 页面配置 ----------
 st.set_page_config(
-    page_title="新闻深度解构 | 老记者AI助手",
-    page_icon="📰",
-    layout="centered",
+    page_title='📰 新闻深度解构 | 老记者AI助手',
+    page_icon='📰',
+    layout='centered',
 )
 
-# ---------- 从Secrets或侧边栏获取GitHub Token ----------
+# ---------- 获取 GitHub Token ----------
 def get_github_token() -> Optional[str]:
-    # 优先从Streamlit secrets读取
+    # 1. 从 Streamlit Secrets（云端）
     try:
-        return st.secrets["GITHUB_TOKEN"]
+        return st.secrets['GITHUB_TOKEN']
     except (KeyError, FileNotFoundError):
         pass
-    # 其次尝试环境变量
-    import os
-    token = os.environ.get("GITHUB_TOKEN")
+    # 2. 从环境变量（本地便携版可设置）
+    token = os.environ.get('GITHUB_TOKEN')
     if token:
         return token
-    # 最后让用户在侧边栏输入
-    return st.sidebar.text_input(
-        "🔑 请输入你的 GitHub Token",
-        type="password",
-        help="在 https://github.com/settings/tokens 创建，无需任何权限",
-    )
+    # 3. 从会话状态保留用户输入
+    if 'github_token' in st.session_state and st.session_state.github_token:
+        return st.session_state.github_token
+    return None
 
-# ---------- 调用GitHub Models API ----------
+# ---------- 调用 GitHub Models API (修正版) ----------
 def call_ai_model(news_text: str, token: str) -> str:
-    """
-    使用GitHub Models API中的gpt-4o-mini模型
-    API文档: https://docs.github.com/en/github-models
-    """
-    endpoint = "https://models.inference.ai.azure.com"
-    model = "gpt-4o-mini"  # 也可用 "meta-llama-3-8b-instruct"
+    '''使用 GPT-4o-mini 分析新闻 (GitHub Models API)'''
+    endpoint = 'https://models.inference.ai.azure.com'
+    model = 'gpt-4o-mini'  # 可选: 'gpt-4o', 'gpt-4o-mini', 'meta-llama-3.1-8b-instruct'
 
-    system_prompt = """你是一位拥有40年经验的老记者。请你严格按照以下6个维度，对用户提供的新闻进行深度分析。每个维度要给出具体、有洞察力的内容，而不是空洞的套话。使用中文回答。
+    system_prompt = '''你是一位拥有40年经验的老记者。请你严格按照以下6个维度，对用户提供的新闻进行深度分析。每个维度要给出具体、有洞察力的内容，而不是空洞的套话。使用中文回答。
 
 1. **核心利益冲突 (Core Conflict & Stakeholders)**  
    找出最核心的利益相关方，分析各自的诉求与不可调和的冲突。
@@ -52,7 +47,7 @@ def call_ai_model(news_text: str, token: str) -> str:
 2. **前因与历史脉络 (Context & Backstory)**  
    提供简要时间线（过去3-5年），说明哪些长期趋势导致了当前事件。
 
-3. **“没说出来的话” (Hidden Agendas & Omissions)**  
+3. **"没说出来的话" (Hidden Agendas & Omissions)**  
    识别报道中可能的信息盲区、被淡化或缺失的关键声音/数据。
 
 4. **行业/社会宏观背景 (Macro Background)**  
@@ -66,91 +61,99 @@ def call_ai_model(news_text: str, token: str) -> str:
 
 格式要求：
 - 每个维度标题加粗显示，内容分段清晰。
-- 在最后给出一个简短的总体判断（一句话总结）。"""
+- 最后给出一个简短的总判断（一句话总结）。'''
 
     headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
     }
     payload = {
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": f"请分析以下新闻：\n\n{news_text}"},
+        'messages': [
+            {'role': 'system', 'content': system_prompt},
+            {'role': 'user', 'content': f'请分析以下新闻：\n\n{news_text}'},
         ],
-        "temperature": 0.7,
-        "max_tokens": 2000,
+        'model': model,
+        'temperature': 0.7,
+        'max_tokens': 2000,
     }
 
     try:
         response = requests.post(
-            f"{endpoint}/openai/deployments/{model}/chat/completions?api-version=2024-12-01-preview",
+            f'{endpoint}/chat/completions',
             headers=headers,
             json=payload,
             timeout=60,
         )
         response.raise_for_status()
         result = response.json()
-        return result["choices"][0]["message"]["content"]
+        return result['choices'][0]['message']['content']
     except requests.exceptions.HTTPError as e:
-        st.error(f"HTTP错误: {e.response.status_code} - {e.response.text}")
-        if "401" in str(e):
-            st.error("GitHub Token无效或已过期，请检查后在侧边栏输入正确的Token。")
-        return ""
+        error_detail = e.response.text if e.response else '无详情'
+        st.error(f'HTTP 错误 {e.response.status_code}: {error_detail}')
+        if e.response.status_code == 401:
+            st.error('❌ GitHub Token 无效或已过期，请在左侧重新输入。')
+        elif e.response.status_code == 400:
+            st.error('请求格式错误，请重试。如果持续出现，请检查网络或联系开发者。')
+        return ''
     except Exception as e:
-        st.error(f"请求AI失败: {str(e)}")
-        return ""
+        st.error(f'请求 AI 失败: {str(e)}')
+        return ''
+
+# ---------- 侧边栏 Token 输入 ----------
+with st.sidebar:
+    st.title('🔑 设置')
+    token_input = st.text_input(
+        'GitHub Token',
+        type='password',
+        placeholder='输入你的 GitHub Token',
+        help='在 https://github.com/settings/tokens 创建，无需任何权限',
+    )
+    if token_input:
+        st.session_state.github_token = token_input
+        st.success('Token 已保存（仅本次会话有效）')
+    st.markdown('---')
+    st.markdown(
+        '**部署说明**\n\n'
+        '上传至 Streamlit Cloud 后，在 Settings → Secrets 中添加：\n'
+        '```\nGITHUB_TOKEN = "你的token"\n```\n'
+        '即可让朋友无需输入直接使用。'
+    )
 
 # ---------- 主界面 ----------
-def main():
-    st.title("📰 新闻深度解构")
-    st.markdown(
-        "**“新闻的表面是沙子，背后的真相才是金子。”**\n\n"
-        "本工具由一位40年经验的老记者设计，通过6个核心维度帮你剥开新闻表象，看清本质。"
-    )
+st.title('📰 新闻深度解构')
+st.markdown(
+    '**"新闻的表面是沙子，背后的真相才是金子。"**\n\n'
+    '本工具由一位40年经验的老记者设计，通过6个核心维度帮你剥开新闻表象，看清本质。'
+)
 
-    # 获取Token
-    token = get_github_token()
-    if not token:
-        st.warning("⚠️ 请在左侧边栏输入你的 GitHub Token 以启用AI分析。")
-        return
+token = get_github_token()
+if not token:
+    st.warning('⚠️ 请在左侧输入 GitHub Token 以启用 AI 分析。')
+    st.stop()
 
-    # 新闻输入
-    news_text = st.text_area(
-        "📝 粘贴新闻报导的全文或摘要",
-        height=300,
-        placeholder="将新闻内容粘贴到这里...",
-    )
+# 新闻输入
+news_text = st.text_area(
+    '📝 粘贴新闻报导的全文或摘要',
+    height=300,
+    placeholder='将新闻内容粘贴到这里...',
+)
 
-    col1, col2, col3 = st.columns([1, 1, 1])
-    with col2:
-        analyze_btn = st.button("🔍 开始深度分析", type="primary", use_container_width=True)
+col1, col2, col3 = st.columns([1, 1, 1])
+with col2:
+    analyze_btn = st.button('🔍 开始深度分析', type='primary', use_container_width=True)
 
-    # 分析过程
-    if analyze_btn and news_text.strip():
-        with st.spinner("🕵️ 老记者正在剥洋葱...可能需要30秒"):
-            analysis = call_ai_model(news_text, token)
+if analyze_btn and news_text.strip():
+    with st.spinner('🕵️ 老记者正在剥洋葱... 可能需要 30 秒'):
+        analysis = call_ai_model(news_text, token)
 
-        if analysis:
-            st.success("✅ 分析完成！")
-            st.markdown("---")
-            st.markdown(analysis)
-            st.markdown("---")
-            st.caption("本分析由AI基于公开模型生成，仅供参考。请独立思考并核实关键信息。")
-        else:
-            st.error("分析失败，请检查Token或稍后重试。")
+    if analysis:
+        st.success('✅ 分析完成！')
+        st.markdown('---')
+        st.markdown(analysis)
+        st.markdown('---')
+        st.caption('本分析由 AI 基于公开模型生成，仅供参考。请独立思考并核实关键信息。')
+    else:
+        st.error('分析失败，请检查 Token 或稍后重试。')
 
-    elif analyze_btn and not news_text.strip():
-        st.warning("请先输入新闻内容！")
-
-    # 侧边栏说明
-    st.sidebar.markdown("## 💡 使用说明")
-    st.sidebar.markdown(
-        """
-1. **在左侧输入你的 GitHub Token**（可在 [GitHub Settings](https://github.com/settings/tokens) 创建，无需任何权限）
-2. **粘贴新闻全文或摘要**
-3. **点击“开始深度分析”**
-4. AI会从6个维度返回深度解读
-
-**部署到Streamlit Cloud后，只需在App的Secrets中添加：**
-```toml
-GITHUB_TOKEN = "你的token"
+elif analyze_btn and not news_text.strip():
+    st.warning('请先输入新闻内容！')
